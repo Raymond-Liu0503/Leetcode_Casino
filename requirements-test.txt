@@ -1,0 +1,4 @@
+# Testing dependencies for Leetcode Tracker
+pytest>=7.0.0
+pytest-cov>=4.0.0  # Optional: for coverage reports
+

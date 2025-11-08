@@ -433,17 +433,34 @@ class LeetcodeTracker:
             print(f"Invalid difficulty: {difficulty}")
             return None
         
-        # Check if solved today
+        # Check if solved today - determine if this is the first problem solved today
         today = datetime.now(timezone.utc).date()
         last_solved_date = user.last_solved_date.date() if user.last_solved_date else None
         
-        # Update streak
-        if last_solved_date == today:
-            pass
-        elif last_solved_date == today - timedelta(days=1):
-            user.current_streak += 1
-        else:
-            user.current_streak = 1
+        # Check if user has already solved a problem today by querying the database
+        # This is more reliable than just checking last_solved_date
+        today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
+        today_end = datetime.combine(today, datetime.max.time()).replace(tzinfo=timezone.utc)
+        problems_today = self.session.query(SolvedProblem)\
+            .filter_by(user_id=user.id)\
+            .filter(SolvedProblem.solved_at >= today_start)\
+            .filter(SolvedProblem.solved_at <= today_end)\
+            .count()
+        
+        is_first_problem_today = problems_today == 0
+        
+        # Update streak - only increment if this is the first problem solved today
+        if is_first_problem_today:
+            if last_solved_date is None:
+                # First problem ever solved
+                user.current_streak = 1
+            elif last_solved_date == today - timedelta(days=1):
+                # Consecutive day - increment streak
+                user.current_streak += 1
+            else:
+                # Gap in solving or first solve - reset streak to 1
+                user.current_streak = 1
+        # If not first problem today, don't change the streak
         
         # Calculate investment with multiplier
         base_value = DIFFICULTY_VALUES.get(difficulty, 10.0)
