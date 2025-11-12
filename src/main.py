@@ -5,9 +5,12 @@ Leetcode Investment Tracker - Backend API with Flask
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, text
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from datetime import datetime, timedelta, timezone
+# Note: datetime and timedelta are imported above, no need to import again
 from typing import Optional, List
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, session
 from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 import requests
 import random
 import json
@@ -15,6 +18,9 @@ import leetcode
 import leetcode.auth
 from dotenv import load_dotenv
 import os
+import re
+import secrets
+from datetime import datetime, timedelta
 
 load_dotenv()
 Base = declarative_base()
@@ -54,6 +60,8 @@ class User(Base):
     __tablename__ = 'users'
     
     id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)
     username = Column(String, unique=True, nullable=False)
     leetcode_username = Column(String)
     leetcode_session = Column(String)
@@ -202,13 +210,46 @@ class LeetcodeTracker:
                     print("Adding problem_slug column to solved_problems table...")
                     conn.execute(text("ALTER TABLE solved_problems ADD COLUMN problem_slug VARCHAR"))
                     print("Migration completed successfully.")
+                
+                # Check if email column exists, if not add it
+                result = conn.execute(text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='users' AND column_name='email'
+                """))
+                if result.fetchone() is None:
+                    print("Adding email and password_hash columns to users table...")
+                    # For existing users, we'll need to handle migration
+                    # For now, add nullable columns and require email/password for new users
+                    try:
+                        conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR"))
+                        conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR"))
+                        print("Migration completed successfully.")
+                    except Exception as e:
+                        # If using SQLite, syntax might be different
+                        print(f"Note: Migration may require manual steps for existing database: {e}")
         except Exception as e:
             # If migration fails, it's okay - column might already exist or table might not exist yet
             print(f"Migration check completed (column may already exist): {e}")
     
-    def create_user(self, username: str, leetcode_username: str = None, 
-                   leetcode_session: str = None) -> User:
+    def create_user(self, email: str, password: str, username: str, 
+                   leetcode_username: str = None, leetcode_session: str = None) -> Optional[User]:
+        # Validate email format
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+            return None
+        
+        # Check if email or username already exists
+        if self.session.query(User).filter_by(email=email).first():
+            return None
+        if self.session.query(User).filter_by(username=username).first():
+            return None
+        
+        # Hash password
+        password_hash = generate_password_hash(password)
+        
         user = User(
+            email=email,
+            password_hash=password_hash,
             username=username,
             leetcode_username=leetcode_username or username,
             leetcode_session=leetcode_session
@@ -216,6 +257,21 @@ class LeetcodeTracker:
         self.session.add(user)
         self.session.commit()
         return user
+    
+    def authenticate_user(self, email: str, password: str) -> Optional[User]:
+        """Authenticate user by email and password"""
+        user = self.session.query(User).filter_by(email=email).first()
+        if user and check_password_hash(user.password_hash, password):
+            return user
+        return None
+    
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        """Get user by email"""
+        return self.session.query(User).filter_by(email=email).first()
+    
+    def get_user_by_id(self, user_id: int) -> Optional[User]:
+        """Get user by ID"""
+        return self.session.query(User).filter_by(id=user_id).first()
     
     def get_user(self, username: str) -> Optional[User]:
         try:
@@ -252,10 +308,14 @@ class LeetcodeTracker:
         today = datetime.now(timezone.utc).date()
         last_solved_date = user.last_solved_date.date()
         
-        # If user has a streak but last solved was more than 1 day ago, break the streak
-        if user.current_streak > 0 and last_solved_date < today - timedelta(days=1):
-            user.current_streak = 0
-            self.session.commit()
+        # If user has a streak, check if it should be broken
+        # Streak should only be broken if last solved was 2+ days ago (not yesterday or today)
+        if user.current_streak > 0:
+            days_since_last_solve = (today - last_solved_date).days
+            # Break streak only if it's been 2+ days since last solve
+            if days_since_last_solve >= 2:
+                user.current_streak = 0
+                self.session.commit()
         
         # Only apply decay when streak is 0
         if user.current_streak > 0:
@@ -393,8 +453,7 @@ class LeetcodeTracker:
             'total_multiplier': round(user.total_multiplier * 100, 2)  # As percentage
         }
     
-    def add_solved_problem(self, username: str, problem_title_slug: str, 
-                          difficulty: str = None) -> Optional[dict]:
+    def add_solved_problem(self, username: str, problem_title_slug: str) -> Optional[dict]:
         user = self.get_user(username)
         if not user:
             print(f"User not found: {username}")
@@ -404,29 +463,20 @@ class LeetcodeTracker:
         
         # Fetch problem info
         topics = []
-        if not difficulty:
-            service = LeetcodeService(user.leetcode_session)
-            problem_info = service.get_problem_info(problem_title_slug)
-            if problem_info:
-                difficulty = problem_info['difficulty']
-                title = problem_info['title']
-                problem_id = problem_info['questionId']
-                topics = problem_info.get('topics', [])
-                print(f"Fetched problem: {title} ({difficulty}) - Topics: {topics}")
-            else:
-                print(f"Could not fetch problem info for: {problem_title_slug}")
-                print("Attempting with manual difficulty...")
-                difficulty = 'Medium'
-                title = problem_title_slug.replace('-', ' ').title()
-                problem_id = problem_title_slug
-        else:
-            # Still try to fetch topics even if difficulty is provided
-            service = LeetcodeService(user.leetcode_session)
-            problem_info = service.get_problem_info(problem_title_slug)
-            if problem_info:
-                topics = problem_info.get('topics', [])
-            title = problem_title_slug.replace('-', ' ').title()
-            problem_id = problem_title_slug
+        service = LeetcodeService(user.leetcode_session)
+        problem_info = service.get_problem_info(problem_title_slug)
+        
+        if not problem_info:
+            print(f"Problem not found: {problem_title_slug}")
+            return None
+        
+        # Extract problem details
+        title = problem_info['title']
+        problem_id = problem_info['questionId']
+        difficulty = problem_info['difficulty']
+        topics = problem_info.get('topics', [])
+        
+        print(f"Fetched problem: {title} ({difficulty}) - Topics: {topics}")
         
         # Validate difficulty
         if difficulty not in DIFFICULTY_VALUES:
@@ -723,53 +773,216 @@ class LeetcodeTracker:
 
 # Flask API
 app = Flask(__name__)
-CORS(app)
+app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'  # Required for cross-origin requests
+app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS (must be True if SameSite=None)
+app.config['SESSION_COOKIE_DOMAIN'] = None  # Allow cookies for localhost
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)  # Session lasts 7 days
+
+# Configure CORS to allow credentials
+# Allow common development ports (including VS Code Live Server on 5500)
+allowed_origins = [
+    'http://localhost:8000', 
+    'http://127.0.0.1:8000', 
+    'http://localhost:5000', 
+    'http://127.0.0.1:5000',
+    'http://localhost:5500',
+    'http://127.0.0.1:5500',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000'
+]
+
+CORS(app, 
+     supports_credentials=True,
+     origins=allowed_origins,
+     allow_headers=['Content-Type', 'Authorization', 'X-Requested-With'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+     expose_headers=['Content-Type'],
+     max_age=3600)
 
 tracker = LeetcodeTracker()
+
+# Simple token storage (in production, use Redis or database)
+user_tokens = {}  # token -> user_id mapping
+token_expiry = {}  # token -> expiry datetime
+
+def generate_token():
+    """Generate a secure random token"""
+    return secrets.token_urlsafe(32)
+
+def get_user_from_token():
+    """Get user from Authorization header token"""
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return None
+    
+    token = auth_header.split(' ')[1]
+    
+    # Check if token exists and is not expired
+    if token not in user_tokens:
+        return None
+    
+    if token in token_expiry and datetime.now() > token_expiry[token]:
+        # Token expired, remove it
+        del user_tokens[token]
+        del token_expiry[token]
+        return None
+    
+    user_id = user_tokens[token]
+    return tracker.get_user_by_id(user_id)
+
+# Authentication decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = get_user_from_token()
+        if not user:
+            return jsonify({'error': 'Authentication required'}), 401
+        # Store user in request context for easy access
+        request.current_user = user
+        return f(*args, **kwargs)
+    return decorated_function
+
+def get_current_user():
+    """Get the current logged-in user from token"""
+    return getattr(request, 'current_user', None) or get_user_from_token()
 
 @app.route('/')
 def index():
     return jsonify({
         'message': 'Leetcode Investment Tracker API',
         'endpoints': {
-            'users': '/api/users',
-            'user_stats': '/api/users/<username>/stats',
-            'problems': '/api/users/<username>/problems',
-            'history': '/api/users/<username>/history',
-            'spin': '/api/users/<username>/spin',
+            'auth': {
+                'signup': '/api/auth/signup',
+                'login': '/api/auth/login',
+                'logout': '/api/auth/logout',
+                'me': '/api/auth/me'
+            },
+            'user_stats': '/api/stats',
+            'problems': '/api/problems',
+            'history': '/api/history',
+            'spin': '/api/spin',
             'leaderboard': '/api/leaderboard'
         }
     })
 
-@app.route('/api/users', methods=['GET', 'POST'])
-def users():
-    if request.method == 'POST':
-        data = request.json
-        user = tracker.create_user(
-            data['username'],
-            data.get('leetcode_username'),
-            data.get('leetcode_session')
-        )
-        return jsonify({'username': user.username}), 201
-    else:
-        users = tracker.get_all_users()
-        return jsonify([{'username': u.username} for u in users])
+# Authentication endpoints
+@app.route('/api/auth/signup', methods=['POST'])
+def signup():
+    data = request.json
+    if not data or not data.get('email') or not data.get('password') or not data.get('username'):
+        return jsonify({'error': 'Email, password, and username are required'}), 400
+    
+    user = tracker.create_user(
+        email=data['email'],
+        password=data['password'],
+        username=data['username'],
+        leetcode_username=data.get('leetcode_username'),
+        leetcode_session=data.get('leetcode_session')
+    )
+    
+    if not user:
+        return jsonify({'error': 'Email or username already exists, or invalid email format'}), 400
+    
+    # Generate and store token for auto-login
+    token = generate_token()
+    user_tokens[token] = user.id
+    token_expiry[token] = datetime.now() + timedelta(days=7)  # Token expires in 7 days
+    
+    return jsonify({
+        'message': 'User created successfully',
+        'token': token,
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'username': user.username
+        }
+    }), 201
 
-@app.route('/api/users/<username>', methods=['DELETE'])
-def delete_user(username):
-    if tracker.delete_user(username):
-        return jsonify({'success': True, 'message': f'User {username} deleted'})
-    return jsonify({'error': 'User not found'}), 404
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    data = request.json
+    if not data or not data.get('email') or not data.get('password'):
+        return jsonify({'error': 'Email and password are required'}), 400
+    
+    user = tracker.authenticate_user(data['email'], data['password'])
+    if not user:
+        return jsonify({'error': 'Invalid email or password'}), 401
+    
+    # Generate and store token
+    token = generate_token()
+    user_tokens[token] = user.id
+    token_expiry[token] = datetime.now() + timedelta(days=7)  # Token expires in 7 days
+    
+    return jsonify({
+        'message': 'Login successful',
+        'token': token,
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'username': user.username
+        }
+    })
 
-@app.route('/api/users/<username>/stats', methods=['GET'])
-def user_stats(username):
-    stats = tracker.get_user_stats(username)
+@app.route('/api/auth/logout', methods=['POST'])
+@login_required
+def logout():
+    # Remove token
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1]
+        if token in user_tokens:
+            del user_tokens[token]
+        if token in token_expiry:
+            del token_expiry[token]
+    return jsonify({'message': 'Logout successful'})
+
+@app.route('/api/auth/me', methods=['GET'])
+@login_required
+def get_current_user_info():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    return jsonify({
+        'id': user.id,
+        'email': user.email,
+        'username': user.username,
+        'leetcode_username': user.leetcode_username
+    })
+
+@app.route('/api/account/delete', methods=['DELETE'])
+@login_required
+def delete_account():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    if tracker.delete_user(user.username):
+        session.clear()
+        return jsonify({'success': True, 'message': 'Account deleted successfully'})
+    return jsonify({'error': 'Failed to delete account'}), 500
+
+@app.route('/api/stats', methods=['GET'])
+@login_required
+def user_stats():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    stats = tracker.get_user_stats(user.username)
     if stats:
         return jsonify(stats)
     return jsonify({'error': 'User not found'}), 404
 
-@app.route('/api/users/<username>/problems', methods=['GET', 'POST'])
-def problems(username):
+@app.route('/api/problems', methods=['GET', 'POST'])
+@login_required
+def problems():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
     if request.method == 'POST':
         data = request.json
         print(f"Received problem data: {data}")
@@ -778,51 +991,75 @@ def problems(username):
             return jsonify({'error': 'problem_slug is required'}), 400
         
         result = tracker.add_solved_problem(
-            username,
-            data['problem_slug'],
-            data.get('difficulty') if data.get('difficulty') else None
+            user.username,
+            data['problem_slug']
         )
         
         if result:
             return jsonify(result), 201
-        return jsonify({'error': 'Failed to add problem. Check server logs for details.'}), 400
+        return jsonify({'error': 'Problem not found. Please check that the problem slug is correct and exists on LeetCode.'}), 404
     else:
         limit = request.args.get('limit', 10, type=int)
         topic_filter = request.args.get('topic', None, type=str)
-        problems = tracker.get_recent_problems(username, limit, topic_filter)
+        problems = tracker.get_recent_problems(user.username, limit, topic_filter)
         return jsonify(problems)
 
-@app.route('/api/users/<username>/problems/<int:problem_id>', methods=['DELETE'])
-def delete_problem(username, problem_id):
-    if tracker.delete_problem(username, problem_id):
+@app.route('/api/problems/<int:problem_id>', methods=['DELETE'])
+@login_required
+def delete_problem(problem_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    if tracker.delete_problem(user.username, problem_id):
         return jsonify({'success': True})
     return jsonify({'error': 'Problem not found'}), 404
 
-@app.route('/api/users/<username>/topics', methods=['GET'])
-def get_topics(username):
-    topics = tracker.get_available_topics(username)
+@app.route('/api/topics', methods=['GET'])
+@login_required
+def get_topics():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    topics = tracker.get_available_topics(user.username)
     return jsonify(topics)
 
-@app.route('/api/users/<username>/history', methods=['GET'])
-def history(username):
+@app.route('/api/history', methods=['GET'])
+@login_required
+def history():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
     limit = request.args.get('limit', 20, type=int)
-    history = tracker.get_investment_history(username, limit)
+    history = tracker.get_investment_history(user.username, limit)
     return jsonify(history)
 
-@app.route('/api/users/<username>/spin', methods=['POST'])
-def spin_wheel(username):
+@app.route('/api/spin', methods=['POST'])
+@login_required
+def spin_wheel():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
     data = request.json or {}
     token_type = data.get('token_type', 'Easy')
     
-    result = tracker.spin_wheel(username, token_type)
+    result = tracker.spin_wheel(user.username, token_type)
     if result:
         return jsonify(result), 200
     return jsonify({'error': 'Not enough tokens of that type or user not found'}), 400
 
-@app.route('/api/users/<username>/spins', methods=['GET'])
-def spin_history(username):
+@app.route('/api/spins', methods=['GET'])
+@login_required
+def spin_history():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
     limit = request.args.get('limit', 10, type=int)
-    spins = tracker.get_spin_history(username, limit)
+    spins = tracker.get_spin_history(user.username, limit)
     return jsonify(spins)
 
 @app.route('/api/leaderboard', methods=['GET'])
