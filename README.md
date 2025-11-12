@@ -1,4 +1,4 @@
-# LeetCode Investment Tracker 🚀
+# LeetCode Casino 
 
 A gamified LeetCode problem tracker that treats problem-solving as an investment portfolio. Track your progress, maintain streaks, earn tokens, and spin the wheel for rewards!
 
