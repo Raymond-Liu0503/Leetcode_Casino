@@ -5,7 +5,6 @@ Leetcode Investment Tracker - Backend API with Flask
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, text
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from datetime import datetime, timedelta, timezone
-# Note: datetime and timedelta are imported above, no need to import again
 from typing import Optional, List
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
@@ -20,7 +19,11 @@ from dotenv import load_dotenv
 import os
 import re
 import secrets
-from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # Fallback for Python < 3.9
+    from backports.zoneinfo import ZoneInfo
 
 load_dotenv()
 Base = declarative_base()
@@ -54,6 +57,35 @@ PRIZE_RANGES = {
 }
 DAILY_DECAY_RATE = 0.02  # 2% decay per day without solving
 STREAK_MULTIPLIER = 0.04  # 4% bonus per day streak
+
+# EST timezone (handles both EST and EDT automatically)
+EST = ZoneInfo('America/New_York')
+
+def get_est_now() -> datetime:
+    """Get current datetime in EST timezone"""
+    return datetime.now(EST)
+
+def get_est_date() -> datetime.date:
+    """Get current date in EST timezone (resets at 12am EST)"""
+    return get_est_now().date()
+
+def utc_to_est(utc_dt: datetime) -> datetime:
+    """Convert UTC datetime to EST datetime"""
+    if utc_dt.tzinfo is None:
+        # Assume UTC if no timezone info
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    elif utc_dt.tzinfo != timezone.utc:
+        # Convert to UTC first if it's in a different timezone
+        utc_dt = utc_dt.astimezone(timezone.utc)
+    return utc_dt.astimezone(EST)
+
+def get_est_day_start(est_date: datetime.date) -> datetime:
+    """Get the start of a day (12am) in EST for a given EST date"""
+    return datetime.combine(est_date, datetime.min.time()).replace(tzinfo=EST)
+
+def get_est_day_end(est_date: datetime.date) -> datetime:
+    """Get the end of a day (11:59:59.999999) in EST for a given EST date"""
+    return datetime.combine(est_date, datetime.max.time()).replace(tzinfo=EST)
 
 
 class User(Base):
@@ -304,14 +336,15 @@ class LeetcodeTracker:
         if not user.last_solved_date:
             return
         
-        # Check if streak should be broken (missed a day)
-        today = datetime.now(timezone.utc).date()
-        last_solved_date = user.last_solved_date.date()
+        # Check if streak should be broken (missed a day) - using EST dates
+        today_est = get_est_date()
+        # Convert last_solved_date (stored in UTC) to EST for comparison
+        last_solved_est = utc_to_est(user.last_solved_date).date()
         
         # If user has a streak, check if it should be broken
         # Streak should only be broken if last solved was 2+ days ago (not yesterday or today)
         if user.current_streak > 0:
-            days_since_last_solve = (today - last_solved_date).days
+            days_since_last_solve = (today_est - last_solved_est).days
             # Break streak only if it's been 2+ days since last solve
             if days_since_last_solve >= 2:
                 user.current_streak = 0
@@ -334,19 +367,19 @@ class LeetcodeTracker:
         
         # Determine the reference date: last decay date or last solved date
         if last_decay:
-            # Use the date of the last decay (only date part, ignore time)
-            last_decay_date = last_decay.date.date()
+            # Use the date of the last decay (convert to EST for comparison)
+            last_decay_est = utc_to_est(last_decay.date).date()
             
-            # If decay was already applied today, don't apply again
-            if last_decay_date >= today:
+            # If decay was already applied today (EST), don't apply again
+            if last_decay_est >= today_est:
                 return
             
             # Calculate days since last decay
-            days_since_last_decay = (today - last_decay_date).days
+            days_since_last_decay = (today_est - last_decay_est).days
             days_to_apply = days_since_last_decay
         else:
-            # No previous decay, calculate from last solved date
-            days_inactive = (datetime.now(timezone.utc).date() - user.last_solved_date.date()).days
+            # No previous decay, calculate from last solved date (using EST)
+            days_inactive = (today_est - last_solved_est).days
             days_to_apply = days_inactive
         
         # Only apply decay if there are days to decay and user has investment
@@ -484,27 +517,32 @@ class LeetcodeTracker:
             return None
         
         # Check if solved today - determine if this is the first problem solved today
-        today = datetime.now(timezone.utc).date()
-        last_solved_date = user.last_solved_date.date() if user.last_solved_date else None
+        # Use EST dates for streak calculations (resets at 12am EST)
+        today_est = get_est_date()
+        last_solved_est = utc_to_est(user.last_solved_date).date() if user.last_solved_date else None
         
-        # Check if user has already solved a problem today by querying the database
-        # This is more reliable than just checking last_solved_date
-        today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
-        today_end = datetime.combine(today, datetime.max.time()).replace(tzinfo=timezone.utc)
+        # Check if user has already solved a problem today (EST) by querying the database
+        # Convert EST day boundaries to UTC for database query (solved_at is stored in UTC)
+        today_start_est = get_est_day_start(today_est)
+        today_end_est = get_est_day_end(today_est)
+        # Convert to UTC for database comparison
+        today_start_utc = today_start_est.astimezone(timezone.utc)
+        today_end_utc = today_end_est.astimezone(timezone.utc)
+        
         problems_today = self.session.query(SolvedProblem)\
             .filter_by(user_id=user.id)\
-            .filter(SolvedProblem.solved_at >= today_start)\
-            .filter(SolvedProblem.solved_at <= today_end)\
+            .filter(SolvedProblem.solved_at >= today_start_utc)\
+            .filter(SolvedProblem.solved_at <= today_end_utc)\
             .count()
         
         is_first_problem_today = problems_today == 0
         
-        # Update streak - only increment if this is the first problem solved today
+        # Update streak - only increment if this is the first problem solved today (EST)
         if is_first_problem_today:
-            if last_solved_date is None:
+            if last_solved_est is None:
                 # First problem ever solved
                 user.current_streak = 1
-            elif last_solved_date == today - timedelta(days=1):
+            elif last_solved_est == today_est - timedelta(days=1):
                 # Consecutive day - increment streak
                 user.current_streak += 1
             else:

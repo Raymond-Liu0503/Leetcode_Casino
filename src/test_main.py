@@ -31,7 +31,7 @@ def tracker():
 @pytest.fixture
 def user(tracker):
     """Create a test user"""
-    return tracker.create_user("testuser", "testuser_leetcode")
+    return tracker.create_user("test@example.com", "password123", "testuser", "testuser_leetcode")
 
 
 class TestUserCreation:
@@ -39,7 +39,7 @@ class TestUserCreation:
     
     def test_create_user(self, tracker):
         """Test creating a new user"""
-        user = tracker.create_user("newuser", "newuser_leetcode")
+        user = tracker.create_user("newuser@example.com", "password123", "newuser", "newuser_leetcode")
         assert user.username == "newuser"
         assert user.leetcode_username == "newuser_leetcode"
         assert user.total_investment == 0.0
@@ -190,15 +190,14 @@ class TestProblemSolving:
         """Test adding a problem with specified difficulty"""
         mock_service_instance = Mock()
         mock_service_instance.get_problem_info.return_value = {
+            'questionId': '1',
+            'title': 'Two Sum',
+            'difficulty': 'Easy',
             'topics': ['Array', 'Hash Table']
         }
         
         with patch('main.LeetcodeService', return_value=mock_service_instance):
-            result = tracker.add_solved_problem(
-                "testuser", 
-                "two-sum",
-                difficulty="Easy"
-            )
+            result = tracker.add_solved_problem("testuser", "two-sum")
             assert result is not None
             assert result['problem']['difficulty'] == "Easy"
             assert result['problem']['investment_value'] > 0
