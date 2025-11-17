@@ -229,6 +229,79 @@ The test suite covers:
 
 See [TEST_README.md](TEST_README.md) for more details.
 
+## Code Quality
+
+### Style Checking and Formatting
+
+This project uses **Ruff** for linting and formatting. Ruff is a fast, modern Python linter that combines the functionality of flake8, isort, and black.
+
+1. **Install dependencies** (if not already installed):
+
+```bash
+pip install -r requirements-test.txt
+```
+
+2. **Check for style issues**:
+
+```bash
+ruff check src/
+```
+
+3. **Auto-fix style issues**:
+
+```bash
+ruff check --fix src/
+```
+
+4. **Format code**:
+
+```bash
+ruff format src/
+```
+
+5. **Check and format in one command**:
+
+```bash
+ruff check --fix src/ && ruff format src/
+```
+
+### Type Checking
+
+This project uses **mypy** for static type checking.
+
+1. **Run type checking**:
+
+```bash
+mypy src/
+```
+
+2. **Run type checking with more verbose output**:
+
+```bash
+mypy src/ --show-error-codes
+```
+
+### Running All Checks
+
+You can run all code quality checks at once:
+
+```bash
+# Check style
+ruff check src/
+
+# Format code
+ruff format src/
+
+# Type check
+mypy src/
+```
+
+Or create a simple script to run all checks:
+
+```bash
+ruff check src/ && ruff format --check src/ && mypy src/
+```
+
 ## Project Structure
 
 ```
@@ -238,7 +311,9 @@ Leetcode_Tracker/
 │   ├── index.html           # React frontend
 │   ├── test_main.py         # Unit tests
 │   └── leetcode_tracker.db  # SQLite database (if used)
-├── requirements-test.txt    # Test dependencies
+├── requirements.txt         # Main dependencies
+├── requirements-test.txt    # Test and dev dependencies
+├── pyproject.toml           # Ruff and mypy configuration
 ├── .gitignore              # Git ignore rules
 ├── README.md               # This file
 └── TEST_README.md          # Testing documentation

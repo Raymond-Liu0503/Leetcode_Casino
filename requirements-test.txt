@@ -2,3 +2,9 @@
 pytest>=7.0.0
 pytest-cov>=4.0.0  # Optional: for coverage reports
 
+# Code quality tools
+ruff>=0.1.0  # Fast Python linter and formatter
+mypy>=1.0.0  # Static type checker
+types-requests>=2.28.0  # Type stubs for requests
+types-Flask-Cors>=3.0.0  # Type stubs for flask-cors
+
